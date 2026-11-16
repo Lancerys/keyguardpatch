@@ -1,38 +1,76 @@
-name: Build Keyguard noneRelease (HyperOS unlock-first)
+name: Keyguard patched noneRelease (weekly upstream release)
 
 on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Optional official Keyguard release tag; blank means latest'
+        required: false
+        default: ''
+        type: string
+      force_build:
+        description: 'Rebuild and update an existing release asset'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-keyguard-none-release.yml'
       - 'patches/keyguard/**'
-  workflow_dispatch:
-    inputs:
-      upstream_tag:
-        description: 'Keyguard tag (patch is verified against r20261114)'
-        required: true
-        default: 'r20261114'
-        type: string
-      install_mode:
-        description: 'parallel = separate app to protect your official Keyguard; original = same package (requires matching signature to update)'
-        type: choice
-        required: true
-        default: parallel
-        options:
-          - parallel
-          - original
+  schedule:
+    # Match BitwardenPatch: every Sunday 12:00 UTC / 20:00 Singapore
+    - cron: '0 12 * * 0'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: keyguard-none-release-${{ github.ref }}
+  group: keyguard-patched-release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Patched noneRelease APK
+  resolve:
+    name: Resolve latest official Keyguard release
     runs-on: ubuntu-24.04
+    outputs:
+      upstream_tag: ${{ steps.target.outputs.upstream_tag }}
+      should_build: ${{ steps.target.outputs.should_build }}
+    steps:
+      - name: Resolve tag and skip already-published APKs
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag || '' }}
+          FORCE_BUILD: ${{ inputs.force_build || false }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            tag="$REQUESTED_TAG"
+          else
+            tag="$(gh api repos/AChep/keyguard-app/releases/latest --jq '.tag_name')"
+          fi
+          [[ "$tag" =~ ^r20[0-9]{6}(\.[0-9]+)?$ ]] || {
+            echo "Unexpected official release tag: $tag" >&2
+            exit 1
+          }
+          echo "upstream_tag=$tag" >> "$GITHUB_OUTPUT"
+          apk="Keyguard-${tag}-noneRelease-hyperos.apk"
+          should_build=true
+          if [[ "$EVENT_NAME" != "push" && "$FORCE_BUILD" != "true" ]]; then
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY"               --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$apk"; then
+              should_build=false
+            fi
+          fi
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "Official release: $tag; build required: $should_build"
+
+  build:
+    name: Build signed Keyguard noneRelease (HyperOS patches)
+    runs-on: ubuntu-24.04
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
     timeout-minutes: 180
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -47,7 +85,7 @@ jobs:
 
       - name: Clone a pinned Keyguard release
         env:
-          UPSTREAM_TAG: ${{ inputs.upstream_tag || 'r20261114' }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
         run: |
           set -euo pipefail
           [[ "$UPSTREAM_TAG" =~ ^r20[0-9]{6}(\.[0-9]+)?$ ]] || { echo 'Unexpected tag format'; exit 1; }
@@ -55,7 +93,7 @@ jobs:
             https://github.com/AChep/keyguard-app.git keyguard
           git -C keyguard log -1 --format='%H %s'
 
-      - name: Apply unlock-first source patch (fail closed on code changes)
+      - name: Apply all validated HyperOS and Passkey patches (fail closed)
         run: |
           set -euo pipefail
           python3 patches/keyguard/apply_unlock_first.py keyguard
@@ -115,26 +153,18 @@ jobs:
           PREFETCH_MANIFESTS: ''
         run: bash .github/actions/prefetch_native/prefetch.sh
 
-      - name: Choose parallel or original APK package identity
+      - name: Preserve tested parallel package identity for in-place upgrades
         working-directory: keyguard
-        env:
-          INSTALL_MODE: ${{ inputs.install_mode || 'parallel' }}
         run: |
           set -euo pipefail
-          if [[ "$INSTALL_MODE" == 'parallel' ]]; then
-            python3 - <<'PYTHON'
+          python3 - <<'PYTHON'
           from pathlib import Path
           p = Path('androidApp/build.gradle.kts')
-          text = p.read_text()
+          source = p.read_text()
           old = '    buildTypes {\n        create("benchmarkRelease")'
-          assert text.count(old) == 1, 'Release buildType anchor changed upstream'
-          text = text.replace(old, '    buildTypes {\n        getByName("release").applicationIdSuffix = ".hyperos"\n        create("benchmarkRelease")', 1)
-          p.write_text(text)
+          assert source.count(old) == 1, 'Release buildType anchor changed upstream'
+          p.write_text(source.replace(old, '    buildTypes {\n        getByName("release").applicationIdSuffix = ".hyperos"\n        create("benchmarkRelease")', 1))
           PYTHON
-          elif [[ "$INSTALL_MODE" != 'original' ]]; then
-            echo "Unknown install_mode: $INSTALL_MODE" >&2
-            exit 1
-          fi
 
       - name: Prepare noneRelease signing and non-Play-services configuration
         working-directory: keyguard
@@ -142,7 +172,6 @@ jobs:
           SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          INSTALL_MODE: ${{ inputs.install_mode || 'parallel' }}
         run: |
           set -euo pipefail
           if [[ -z "$SIGN_KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_PASSWORD" ]]; then
@@ -160,10 +189,7 @@ jobs:
 
           # Firebase is unused by the none flavor. This config only satisfies the
           # google-services Gradle plugin; it contains no production API keys.
-          app_id='com.artemchep.keyguard'
-          if [[ "$INSTALL_MODE" == 'parallel' ]]; then
-            app_id='com.artemchep.keyguard.hyperos'
-          fi
+          app_id='com.artemchep.keyguard.hyperos'
           cat > androidApp/google-services.json <<JSON
           {
             "project_info": {
@@ -218,16 +244,67 @@ jobs:
           "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/$(ls "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" | sort -V | tail -1)/apksigner" \
             verify --print-certs "$APK"
           mkdir -p dist
-          cp "$APK" "dist/Keyguard-${{ inputs.upstream_tag || 'r20261114' }}-noneRelease-${{ inputs.install_mode || 'parallel' }}-unlockFirst.apk"
+          cp "$APK" "dist/Keyguard-${{ needs.resolve.outputs.upstream_tag }}-noneRelease-hyperos.apk"
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           cat dist/SHA256SUMS.txt
 
       - name: Upload personal build (not a public GitHub Release)
         uses: actions/upload-artifact@v4
         with:
-          name: keyguard-noneRelease-unlockFirst-${{ inputs.upstream_tag || 'r20261114' }}
+          name: keyguard-noneRelease-${{ needs.resolve.outputs.upstream_tag }}-hyperos
           path: |
             dist/*.apk
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+  release:
+    name: Publish signed APK to matching release
+    runs-on: ubuntu-24.04
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+    steps:
+      - name: Download fully verified APK
+        uses: actions/download-artifact@v4
+        with:
+          name: keyguard-noneRelease-${{ needs.resolve.outputs.upstream_tag }}-hyperos
+          path: dist
+
+      - name: Verify release files
+        run: |
+          set -euo pipefail
+          test -s "dist/Keyguard-${UPSTREAM_TAG}-noneRelease-hyperos.apk"
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+
+      - name: Publish or update matching GitHub Release
+        run: |
+          set -euo pipefail
+          tag="$UPSTREAM_TAG"
+          file="dist/Keyguard-${tag}-noneRelease-hyperos.apk"
+          cat > RELEASE_NOTES.md <<EOF
+          Patched Keyguard noneRelease for Xiaomi / HyperOS.
+
+          Upstream version: [${tag}](https://github.com/AChep/keyguard-app/releases/tag/${tag})
+          Patch revision: [${GITHUB_SHA}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})
+
+          Includes:
+          - Unlock-first Passkey entry on supported Xiaomi devices
+          - Real Passkey picker after unlocking, with RP matching and native assertion
+          - Bitwarden-style login title, username and URI prefill when creating Passkeys
+
+          Package: `com.artemchep.keyguard.hyperos` (same signing identity across builds).
+          Created from upstream sources using the patches in this repository.
+
+          Note: Keyguard upstream declares All Rights Reserved. Respect its distribution terms.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY"               --title "Keyguard ${tag} · HyperOS patched" --notes-file RELEASE_NOTES.md
+          fi
+          gh release upload "$tag" "$file" dist/SHA256SUMS.txt             --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets             --jq '.assets[].name'
