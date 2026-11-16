@@ -72,10 +72,14 @@ jobs:
           echo "Official release: $tag; build required: $should_build"
 
   build:
-    name: Build signed Keyguard noneRelease (HyperOS patches)
+    name: Build signed Keyguard noneRelease (${{ matrix.variant }})
     runs-on: ubuntu-24.04
     needs: resolve
     if: needs.resolve.outputs.should_build == 'true' && !contains(github.event.head_commit.message, '[notes-only]')
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, offline]
     timeout-minutes: 180
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,6 +106,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 patches/keyguard/apply_unlock_first.py keyguard
+          if [[ "${{ matrix.variant }}" == "offline" ]]; then
+            python3 patches/keyguard/apply_offline_qr.py keyguard
+            grep -Fq 'com.google.mlkit:barcode-scanning' keyguard/gradle/libs.versions.toml
+          fi
           git -C keyguard diff --check
           git -C keyguard diff --stat
           grep -Fq 'HYPEROS_UNLOCK_FIRST_SENTINEL' \
@@ -249,17 +257,21 @@ jobs:
           "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/$(ls "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" | sort -V | tail -1)/apksigner" \
             verify --print-certs "$APK"
           mkdir -p dist
-          cp "$APK" "dist/Keyguard-${{ needs.resolve.outputs.upstream_tag }}-noneRelease-hyperos.apk"
-          sha256sum dist/*.apk > dist/SHA256SUMS.txt
-          cat dist/SHA256SUMS.txt
+          suffix=""
+          if [[ "${{ matrix.variant }}" == "offline" ]]; then
+            suffix="-offline-qr"
+          fi
+          cp "$APK" "dist/Keyguard-${{ needs.resolve.outputs.upstream_tag }}-noneRelease-hyperos${suffix}.apk"
+          sha256sum dist/*.apk > "dist/SHA256SUMS-${{ matrix.variant }}.txt"
+          cat "dist/SHA256SUMS-${{ matrix.variant }}.txt"
 
       - name: Upload personal build (not a public GitHub Release)
         uses: actions/upload-artifact@v4
         with:
-          name: keyguard-noneRelease-${{ needs.resolve.outputs.upstream_tag }}-hyperos
+          name: keyguard-noneRelease-${{ needs.resolve.outputs.upstream_tag }}-hyperos-${{ matrix.variant }}
           path: |
             dist/*.apk
-            dist/SHA256SUMS.txt
+            dist/SHA256SUMS-${{ matrix.variant }}.txt
           if-no-files-found: error
           retention-days: 14
   release:
@@ -274,31 +286,35 @@ jobs:
       UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
       REPO_PRIVATE: ${{ github.event.repository.private }}
     steps:
-      - name: Download fully verified APK
+      - name: Download both verified APKs
         uses: actions/download-artifact@v4
         with:
-          name: keyguard-noneRelease-${{ needs.resolve.outputs.upstream_tag }}-hyperos
+          pattern: keyguard-noneRelease-${{ needs.resolve.outputs.upstream_tag }}-hyperos-*
+          merge-multiple: true
           path: dist
 
-      - name: Verify release files
+      - name: Verify both release files
         run: |
           set -euo pipefail
           test -s "dist/Keyguard-${UPSTREAM_TAG}-noneRelease-hyperos.apk"
-          sha256sum -c dist/SHA256SUMS.txt
+          test -s "dist/Keyguard-${UPSTREAM_TAG}-noneRelease-hyperos-offline-qr.apk"
+          sha256sum -c dist/SHA256SUMS-standard.txt
+          sha256sum -c dist/SHA256SUMS-offline.txt
 
       - name: Publish or update matching GitHub Release
         run: |
           set -euo pipefail
           tag="$UPSTREAM_TAG"
-          file="dist/Keyguard-${tag}-noneRelease-hyperos.apk"
           cat > RELEASE_NOTES.md <<EOF
           Patched Keyguard noneRelease for Xiaomi / HyperOS.
 
           Upstream version: [${tag}](https://github.com/AChep/keyguard-app/releases/tag/${tag})
           Patch revision: [${GITHUB_SHA}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})
-          APK download: [Successful Actions run #${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) (see Artifacts).
+          APK downloads (both in the same [Actions run #${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}), under Artifacts):
+          - Standard: Keyguard-${tag}-noneRelease-hyperos.apk (official ML Kit / Play Services)
+          - Offline QR: Keyguard-${tag}-noneRelease-hyperos-offline-qr.apk (bundled ML Kit; only dependency changed)
 
-          Includes:
+          Both variants include the same three patches:
           - Unlock-first Passkey entry on supported Xiaomi devices
           - Real Passkey picker after unlocking, with RP matching and native assertion
           - Bitwarden-style login title, username and URI prefill when creating Passkeys
@@ -314,7 +330,7 @@ jobs:
             gh release create "$tag" --repo "$GITHUB_REPOSITORY"               --title "Keyguard ${tag} · HyperOS patched" --notes-file RELEASE_NOTES.md
           fi
           if [[ "$REPO_PRIVATE" == "true" ]]; then
-            gh release upload "$tag" "$file" dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$tag" dist/*.apk dist/SHA256SUMS-*.txt --repo "$GITHUB_REPOSITORY" --clobber
             gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
           else
             echo "::warning::Public repository: release notes only; do not redistribute proprietary Keyguard APK assets."

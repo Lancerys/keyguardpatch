@@ -1,6 +1,6 @@
 # Keyguard noneRelease · HyperOS / Passkey patches
 
-在 `AChep/keyguard-app` 官方正式标签上构建 `noneRelease`，通过独立补丁脚本添加已经在设备上验证的三个功能。仓库**只维护补丁和 GitHub Actions**，不直接同步或提交上游的整份源码。
+在 `AChep/keyguard-app` 官方正式标签上构建两种 `noneRelease` APK，两种版本都保留已经在设备上验证的三个补丁，区别仅在扫码模型依赖。仓库**只维护补丁和 GitHub Actions**，不直接同步或提交上游的整份源码。
 
 ## 三项补丁
 
@@ -8,14 +8,14 @@
 2. **解锁后选择真正的 Passkey**：根据原始请求的 RP ID、来源和允许的凭据过滤，显示 Keyguard 原生列表，并调用上游 WebAuthn 认证器签名。
 3. **创建 Passkey 时预填登录信息**：参考 Bitwarden Android 的行为，在「新建登录条目」中填入 RP 网站名称、WebAuthn 用户名和来源 URI。保存到已有登录条目时不修改原有名称、用户名或 URI。
 
-所有变更由 `patches/keyguard/apply_unlock_first.py` 在 CI 构建时应用；关键源码锚点不匹配就停止构建，防止发布未打补丁的版本。
+两种版本均由 `patches/keyguard/apply_unlock_first.py` 应用原有三个补丁。`standard` 使用上游扫码依赖，`offline` 再通过 `apply_offline_qr.py` 仅替换 ML Kit 依赖的三处配置；不修改扫码 Kotlin 源码。关键锚点不匹配时停止构建。
 
 ## 周更与 Release
 
 唯一工作流：`.github/workflows/build-keyguard-none-release.yml`，名称为 **Keyguard patched noneRelease (weekly upstream release)**。
 
 - 每周日 **12:00 UTC / 新加坡时间 20:00** 检查 `AChep/keyguard-app` 的最新正式 GitHub Release（如 `r20261114`）。
-- 如果同一上游标签已经完成发布，就跳过重复构建；发布新标签则重新克隆官方代码、应用补丁并构建签名 APK。
+- 如果同一上游标签已经完成发布，就跳过重复构建；发布新标签则重新克隆官方代码、应用补丁并分别构建 `standard` 与 `offline` 两种签名 APK。
 - 修改补丁或工作流并推送至 `main`，会触发重新构建并更新相同上游版本对应的 Release。
 - 也可以通过 **Actions → Keyguard patched noneRelease (weekly upstream release) → Run workflow** 手动指定 `upstream_tag`，或将 `force_build` 设为 `true` 强制重建。
 - 使用上游正式标签构建；若某次上游重构导致补丁锚点或编译失效，流程会失败并保留先前已发布的版本，不会自行猜测修改源代码。
@@ -34,7 +34,7 @@
 
 证书别名 `key0`。请始终保留同一签名密钥，否则 Android 不能直接升级已安装应用。
 
-成功构建的 APK 和 `SHA256SUMS.txt` 会上传到当次 **Actions → Artifacts**，保留 14 天。
+两份 APK 分别上传到同一次 **Actions → Artifacts**，名称为 `...hyperos-standard` 和 `...hyperos-offline`，各带自己的 SHA256 校验文件，保留 14 天。两者包名和签名相同，只能择一安装，互相切换时还需满足 Android 版本号规则。
 
 ### 发布可见性与授权
 
@@ -46,7 +46,8 @@
 
 ```text
 .github/workflows/build-keyguard-none-release.yml   # 唯一周更/正式构建工作流
-patches/keyguard/apply_unlock_first.py               # 三项功能的锚点校验与源码补丁
+patches/keyguard/apply_unlock_first.py               # 两种版本共有的三个补丁
+patches/keyguard/apply_offline_qr.py                 # 仅离线版使用的扫码依赖替换
 README.md
 ```
 
