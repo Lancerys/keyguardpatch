@@ -75,7 +75,7 @@ jobs:
     name: Build signed Keyguard noneRelease (HyperOS patches)
     runs-on: ubuntu-24.04
     needs: resolve
-    if: needs.resolve.outputs.should_build == 'true'
+    if: needs.resolve.outputs.should_build == 'true' && !contains(github.event.head_commit.message, '[notes-only]')
     timeout-minutes: 180
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -296,6 +296,7 @@ jobs:
 
           Upstream version: [${tag}](https://github.com/AChep/keyguard-app/releases/tag/${tag})
           Patch revision: [${GITHUB_SHA}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})
+          APK download: [Successful Actions run #${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) (see Artifacts).
 
           Includes:
           - Unlock-first Passkey entry on supported Xiaomi devices
@@ -318,3 +319,26 @@ jobs:
           else
             echo "::warning::Public repository: release notes only; do not redistribute proprietary Keyguard APK assets."
           fi
+
+  update-existing-release-link:
+    name: Add successful build link without compiling
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[notes-only]')
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Link successful APK artifact in existing r20261114 release
+        run: |
+          set -euo pipefail
+          tag="r20261114"
+          run_id="43837353838"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          # Do not replace existing release notes; only append the Actions link.
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > RELEASE_NOTES.md
+          if ! grep -Fq "$run_url" RELEASE_NOTES.md; then
+            printf '\nAPK download: [Successful Actions run #%s](%s) (see Artifacts).\n' "$run_id" "$run_url" >> RELEASE_NOTES.md
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file RELEASE_NOTES.md
+          fi
+          grep -F "$run_url" RELEASE_NOTES.md
