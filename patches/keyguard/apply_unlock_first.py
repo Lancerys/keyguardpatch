@@ -128,6 +128,12 @@ def modify_get(source: str) -> str:
         'import com.artemchep.keyguard.common.usecase.filterHiddenProfiles\n',
         'passkey model imports')
     source = replace_one(source,
+        'import com.artemchep.keyguard.feature.keyguard.ManualAppScreen\n',
+        'import com.artemchep.keyguard.feature.home.vault.component.CompactVaultItem\n'
+        'import com.artemchep.keyguard.feature.home.vault.screen.toVaultItemPresentation\n'
+        'import com.artemchep.keyguard.feature.keyguard.ManualAppScreen\n',
+        'reuse upstream vault item composable and mapping')
+    source = replace_one(source,
         'import com.artemchep.keyguard.di.KeyguardKoinOwner\n',
         'import com.artemchep.keyguard.di.KeyguardKoinOwner\n'
         'import com.artemchep.keyguard.di.resolveOrCancel\n'
@@ -178,6 +184,7 @@ def modify_get(source: str) -> str:
     override fun onCreate(savedInstanceState: Bundle?) {
 ''',
         '''    private data class HyperOsPasskeyChoice(
+        val cipher: DSecret,
         val title: String,
         val subtitle: String,
         val args: PasskeyProviderGetActivityArgs,
@@ -302,6 +309,7 @@ def modify_get(source: str) -> str:
             ).filterNotNull().map(String::trim).firstOrNull { it.isNotEmpty() }
                 ?: "Passkey"
             HyperOsPasskeyChoice(
+                cipher = cipher,
                 title = displayName,
                 subtitle = cipher.name,
                 args = PasskeyProviderGetActivityArgs(
@@ -322,26 +330,55 @@ def modify_get(source: str) -> str:
 ''',
         'passkey real selection flow')
     source = replace_one(source,
+        '''    override fun Content() {
+        val title = stringResource(Res.string.passkey_auth_via_header)
+        val context by rememberUpdatedState(newValue = LocalContext.current)
+''',
+        '''    override fun Content() {
+        val title = stringResource(Res.string.passkey_auth_via_header)
+        val pickerState = uiStateSink.value as? UiState.PickPasskey
+        val context by rememberUpdatedState(newValue = LocalContext.current)
+''',
+        'use picker state for native credential header')
+    source = replace_one(source,
+        '''                CredentialSubtitlePublicKey(
+                    username = args.credUserDisplayName,
+                    rpId = args.credRpId,
+                )
+''',
+        '''                CredentialSubtitlePublicKey(
+                    username = pickerState?.choices?.firstOrNull()?.args?.credRpId
+                        ?: args.credUserDisplayName,
+                    rpId = if (pickerState != null) null else args.credRpId,
+                )
+''',
+        'show real relying party in picker header')
+    source = replace_one(source,
         '''                            is UiState.RequiresAuthentication -> {
 ''',
         '''                            is UiState.PickPasskey -> {
+                                // Reuse EXACT upstream Keyguard vault list row:
+                                // favicon/avatar, accent, favorite/reprompt badges,
+                                // typography, shape, spacing, tap ripple & feedback.
                                 Column(
                                     modifier = androidx.compose.ui.Modifier
                                         .fillMaxSize()
                                         .verticalScroll(rememberScrollState())
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                        .padding(vertical = 8.dp),
                                 ) {
-                                    Text("选择用于登录的 Passkey", style = MaterialTheme.typography.titleMedium)
                                     state.choices.forEach { choice ->
-                                        OutlinedButton(
-                                            onClick = { state.onSelected(choice.args) },
-                                            modifier = androidx.compose.ui.Modifier.fillMaxWidth(),
+                                        androidx.compose.runtime.key(
+                                            choice.args.cipherId,
+                                            choice.args.credId,
                                         ) {
-                                            Column {
-                                                Text(choice.title)
-                                                Text(choice.subtitle, style = MaterialTheme.typography.bodySmall)
-                                            }
+                                            CompactVaultItem(
+                                                modifier = androidx.compose.ui.Modifier.fillMaxWidth(),
+                                                item = choice.cipher.toVaultItemPresentation(
+                                                    appIcons = true,
+                                                    websiteIcons = true,
+                                                ),
+                                                onClick = { state.onSelected(choice.args) },
+                                            )
                                         }
                                     }
                                 }
