@@ -109,7 +109,8 @@ def modify_get(source: str) -> str:
         'import androidx.compose.foundation.layout.*\n',
         'import androidx.compose.foundation.layout.*\n'
         'import androidx.compose.foundation.rememberScrollState\n'
-        'import androidx.compose.foundation.verticalScroll\n',
+        'import androidx.compose.foundation.verticalScroll\n'
+        'import androidx.compose.ui.unit.dp\n',
         'passkey get compose imports')
     source = replace_one(source,
         'import androidx.credentials.GetCredentialResponse\n',
