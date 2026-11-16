@@ -130,7 +130,8 @@ def modify_get(source: str) -> str:
         'import com.artemchep.keyguard.di.KeyguardKoinOwner\n',
         'import com.artemchep.keyguard.di.KeyguardKoinOwner\n'
         'import com.artemchep.keyguard.di.resolveOrCancel\n'
-        'import com.artemchep.keyguard.common.io.bind\n',
+        'import com.artemchep.keyguard.common.io.bind\n'
+        'import com.artemchep.keyguard.common.io.attempt\n',
         'passkey deps imports')
     source = replace_one(source,
         'import kotlinx.parcelize.Parcelize\n',
@@ -227,7 +228,7 @@ def modify_get(source: str) -> str:
             )
             return
         }
-        uiStateSink.value = UiState.PickPasskey(choices) onSelected@{ selectedArgs ->
+        uiStateSink.value = UiState.PickPasskey(choices, onSelected@{ selectedArgs ->
             // Prevent double tap / multiple assertions.
             if (uiStateSink.value !is UiState.PickPasskey) return@onSelected
             uiStateSink.value = UiState.Loading
@@ -255,7 +256,7 @@ def modify_get(source: str) -> str:
                 setResult(RESULT_OK, resultIntent)
                 finish()
             }
-        }
+        })
     }
 
     private suspend fun loadHyperOsChoices(
