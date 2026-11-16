@@ -9,6 +9,7 @@ import argparse
 from pathlib import Path
 
 ROOT = Path('common/src/androidMain/kotlin/com/artemchep/keyguard/android')
+COMMON_ROOT = Path('common/src/commonMain/kotlin/com/artemchep/keyguard')
 SENTINEL = 'keyguard-hyperos-unlock-first-v1'
 
 
@@ -399,19 +400,155 @@ def modify_provider(source: str) -> str:
     )
 
 
+
+def modify_create(source: str) -> str:
+    return replace_one(
+        source,
+        '''                                            AppMode.SavePasskey(
+                                                rpId = data.rpId,
+                                                onComplete = { cipher ->
+''',
+        '''                                            AppMode.SavePasskey(
+                                                rpId = data.rpId,
+                                                rpName = data.data.rp.name,
+                                                userName = data.data.user.name,
+                                                origin = data.origin,
+                                                packageName = data.packageName,
+                                                onComplete = { cipher ->
+''',
+        'expose verified WebAuthn metadata to new-login editor',
+    )
+
+
+def modify_app_mode(source: str) -> str:
+    return replace_one(
+        source,
+        '''    data class SavePasskey(
+        val rpId: String?,
+        val onComplete: (DSecret) -> Unit,
+    ) : AppMode, HasType {
+        companion object;
+''',
+        '''    data class SavePasskey(
+        val rpId: String?,
+        val rpName: String? = null,
+        val userName: String? = null,
+        val origin: String? = null,
+        val packageName: String? = null,
+        val onComplete: (DSecret) -> Unit,
+    ) : AppMode, HasType {
+        companion object;
+
+        // Match Bitwarden's new-item defaults: verified web origin, otherwise
+        // the requesting Android application. Existing login items are untouched.
+        fun toCreateAutofill(): AddRoute.Args.Autofill {
+            val webOrigin = origin?.takeIf {
+                it.startsWith("https://", ignoreCase = true) ||
+                    it.startsWith("http://", ignoreCase = true)
+            }
+            return if (webOrigin != null) {
+                AddRoute.Args.Autofill(
+                    webDomain = webOrigin.substringAfter("://").trimEnd('/'),
+                    webScheme = webOrigin.substringBefore("://").lowercase(),
+                )
+            } else {
+                AddRoute.Args.Autofill(applicationId = packageName)
+            }
+        }
+''',
+        'carry relying-party name, user name and origin for new logins',
+    )
+
+
+def modify_vault_list_shared(source: str) -> str:
+    source = replace_one(
+        source,
+        '''                is AppMode.QuickSearch -> null
+                is AppMode.SavePasskey -> null
+                is AppMode.PickPasskey -> null
+''',
+        '''                is AppMode.QuickSearch -> null
+                is AppMode.SavePasskey -> mode.toCreateAutofill()
+                is AppMode.PickPasskey -> null
+''',
+        'passkey new-item URI prefill from verified origin',
+    )
+    return replace_one(
+        source,
+        '''                args = AddRoute.Args(
+                    type = type,
+                    autofill = autofill,
+                    name = queryTrimmed.takeIf { it.isNotEmpty() },
+                ),
+''',
+        '''                args = AddRoute.Args(
+                    type = type,
+                    autofill = autofill,
+                    name = if (mode is AppMode.SavePasskey) {
+                        mode.rpName?.takeIf(String::isNotBlank)
+                            ?: mode.rpId?.takeIf(String::isNotBlank)
+                            ?: mode.packageName
+                    } else {
+                        queryTrimmed.takeIf { it.isNotEmpty() }
+                    },
+                    username = (mode as? AppMode.SavePasskey)?.userName,
+                ),
+''',
+        'passkey new-item title and username prefill',
+    )
+
+
+def modify_vault_list_state(source: str) -> str:
+    source = replace_one(
+        source,
+        '''                            is AppMode.QuickSearch -> null
+                            is AppMode.SavePasskey -> null
+                            is AppMode.PickPasskey -> null
+''',
+        '''                            is AppMode.QuickSearch -> null
+                            is AppMode.SavePasskey -> mode.toCreateAutofill()
+                            is AppMode.PickPasskey -> null
+''',
+        'Ctrl+N passkey new-item URI prefill',
+    )
+    return replace_one(
+        source,
+        '''                                type = DSecret.Type.Login,
+                                autofill = autofill,
+                                name = null, //queryTrimmed.takeIf { it.isNotEmpty() },
+''',
+        '''                                type = DSecret.Type.Login,
+                                autofill = autofill,
+                                name = if (mode is AppMode.SavePasskey) {
+                                    mode.rpName?.takeIf(String::isNotBlank)
+                                        ?: mode.rpId?.takeIf(String::isNotBlank)
+                                        ?: mode.packageName
+                                } else {
+                                    null
+                                },
+                                username = (mode as? AppMode.SavePasskey)?.userName,
+''',
+        'Ctrl+N passkey new-item title and username prefill',
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('source', type=Path, help='root of cloned Keyguard project')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
     work = [
-        ('CredentialProviderGetRequestHandler.kt', modify_handler),
-        ('PasskeyGetActivity.kt', modify_get),
-        ('PasskeyProviderGetRequest.kt', modify_provider),
+        (ROOT / 'CredentialProviderGetRequestHandler.kt', modify_handler),
+        (ROOT / 'PasskeyGetActivity.kt', modify_get),
+        (ROOT / 'PasskeyProviderGetRequest.kt', modify_provider),
+        (ROOT / 'PasskeyCreateActivity.kt', modify_create),
+        (COMMON_ROOT / 'AppMode.kt', modify_app_mode),
+        (COMMON_ROOT / 'feature/home/vault/screen/VaultListShared.kt', modify_vault_list_shared),
+        (COMMON_ROOT / 'feature/home/vault/screen/VaultListStateProducer.kt', modify_vault_list_state),
     ]
     result = []
-    for filename, transform in work:
-        path = args.source / ROOT / filename
+    for relative_path, transform in work:
+        path = args.source / relative_path
         if not path.exists():
             raise SystemExit(f'Expected upstream source missing: {path}')
         before = path.read_text(encoding='utf-8')
