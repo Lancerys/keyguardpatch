@@ -19,10 +19,14 @@ jobs:
   resolve:
     runs-on: ubuntu-24.04
     outputs:
-      upstream_tag: r20261114
-      should_build: 'true'
+      upstream_tag: ${{ steps.target.outputs.upstream_tag }}
+      should_build: ${{ steps.target.outputs.should_build }}
     steps:
-      - run: echo 'Pinned experimental upstream: r20261114'
+      - name: Pin official test release
+        id: target
+        run: |
+          echo "upstream_tag=r20261114" >> "$GITHUB_OUTPUT"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build signed Keyguard noneRelease with bundled QR model
