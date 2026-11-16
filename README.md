@@ -1,56 +1,53 @@
-# Keyguard noneRelease · HyperOS unlock-first（实验补丁）
+# Keyguard noneRelease · HyperOS / Passkey patches
 
-这是一个 **Keyguard 原始 `noneRelease` 变体** 的自用 GitHub Actions 构建模板。目标是修复部分 Xiaomi / Redmi / POCO 系统在密码库锁定时，不显示只有 `AuthenticationAction` 的 Passkey 提示的问题。没有改动 Premium 权限判断，也没有启用 Google Play Credential Exchange 后端。
+在 `AChep/keyguard-app` 官方正式标签上构建 `noneRelease`，通过独立补丁脚本添加已经在设备上验证的三个功能。仓库**只维护补丁和 GitHub Actions**，不直接同步或提交上游的整份源码。
 
-## 行为
+## 三项补丁
 
-1. 当 Keyguard **锁定**，且系统发起 **Passkey 获取请求**，且设备为 Xiaomi/Redmi/POCO 时，在 Credential Manager 返回一个不可自动选择的“解锁 Keyguard”虚拟 Passkey 入口。
-2. 用户点此入口，进入 Keyguard 现有的解锁/验证 UI。
-3. 解锁后按原始请求的 WebAuthn RP ID、来源和 `allowCredentials` 过滤真实 Passkey，展示实际账号列表。
-4. 用户选中一个真实 Passkey，继续使用官方 `PasskeyProviderGetFlow`、`PasskeyProviderGetRequest` 和 WebAuthn authenticator 生成断言，并把 `GetCredentialResponse` 交回 Android。
+1. **HyperOS 锁库解锁入口**：小米系设备的 Android Credential Manager 在 Keyguard 锁库时显示一个不可自动选中的入口，点选后进入原生解锁流程。
+2. **解锁后选择真正的 Passkey**：根据原始请求的 RP ID、来源和允许的凭据过滤，显示 Keyguard 原生列表，并调用上游 WebAuthn 认证器签名。
+3. **创建 Passkey 时预填登录信息**：参考 Bitwarden Android 的行为，在「新建登录条目」中填入 RP 网站名称、WebAuthn 用户名和来源 URI。保存到已有登录条目时不修改原有名称、用户名或 URI。
 
-假入口不含真实账号、凭据 ID 或私钥，不会自动完成登录。非小米设备及未锁库状态保持原流程。
+所有变更由 `patches/keyguard/apply_unlock_first.py` 在 CI 构建时应用；关键源码锚点不匹配就停止构建，防止发布未打补丁的版本。
 
-## 工作流安装
+## 周更与 Release
 
-将以下两个文件复制到 **你自己的 GitHub 仓库**。推荐使用私有仓库，以免构建日志和 APK 工件被公开；如果放在现有的 BitwardenPatch 仓库，工作流与原 Android/Browser 构建也互不干扰：
+唯一工作流：`.github/workflows/build-keyguard-none-release.yml`，名称为 **Keyguard patched noneRelease (weekly upstream release)**。
+
+- 每周日 **12:00 UTC / 新加坡时间 20:00** 检查 `AChep/keyguard-app` 的最新正式 GitHub Release（如 `r20261114`）。
+- 如果同一上游标签已经完成发布，就跳过重复构建；发布新标签则重新克隆官方代码、应用补丁并构建签名 APK。
+- 修改补丁或工作流并推送至 `main`，会触发重新构建并更新相同上游版本对应的 Release。
+- 也可以通过 **Actions → Keyguard patched noneRelease (weekly upstream release) → Run workflow** 手动指定 `upstream_tag`，或将 `force_build` 设为 `true` 强制重建。
+- 使用上游正式标签构建；若某次上游重构导致补丁锚点或编译失效，流程会失败并保留先前已发布的版本，不会自行猜测修改源代码。
+
+使用：`./gradlew --no-daemon --max-workers=2 :androidApp:assembleNoneRelease -Pkeyguard.nativeCargo.cargoOffline=true`。构建前自动配置 Java 21、对应 Android NDK、Rust 工具链、原生预取和非 Google Play 占位设置。
+
+## 安装和签名
+
+稳定 APK 的包名固定为 **`com.artemchep.keyguard.hyperos`**，与之前的测试成功版本相同，可与官方 Keyguard 并存。后续使用相同签名密钥、上游递增版本号的 APK 即可覆盖升级。不能直接覆盖官方应用的签名包。
+
+仓库 Actions Secrets：
+
+- `SIGN_KEYSTORE_BASE64`
+- `KEYSTORE_PASSWORD`
+- `KEY_PASSWORD`
+
+证书别名 `key0`。请始终保留同一签名密钥，否则 Android 不能直接升级已安装应用。
+
+成功构建的 APK 和 `SHA256SUMS.txt` 会上传到当次 **Actions → Artifacts**，保留 14 天。
+
+### 发布可见性与授权
+
+**Keyguard 上游 `LICENSE` 标明 `All Rights Reserved`。** 当前仓库公开，因此自动 GitHub Release 仅发布版本说明，不上传改编的 APK。完整 APK 仍通过 Actions 构建产物提供用于个人验证。
+
+如果未来将本仓库改为 **Private**，工作流可以将构建产物上传到仅仓库授权用户可访问的 GitHub Release。切换后手动启用一次 `force_build` 即可为当前上游版本补齐 Release 附件。
+
+## 项目结构
 
 ```text
-.github/workflows/build-keyguard-none-release.yml
-patches/keyguard/apply_unlock_first.py
+.github/workflows/build-keyguard-none-release.yml   # 唯一周更/正式构建工作流
+patches/keyguard/apply_unlock_first.py               # 三项功能的锚点校验与源码补丁
+README.md
 ```
 
-进入仓库的 **Actions → Build Keyguard noneRelease (HyperOS unlock-first) → Run workflow**。默认检出上游 `r20261114`（Keyguard 3.8.1），自动应用补丁并运行 `:androidApp:assembleNoneRelease`。完成后在本次运行下的 **Artifacts** 里下载 APK。
-
-### 签名 Secrets
-
-工作流沿用原 `BitwardenPatch` Android 工作流的三个 Secrets：
-
-- `SIGN_KEYSTORE_BASE64`：签名 JKS 文件的 Base64 内容。
-- `KEYSTORE_PASSWORD`：JKS keystore 密码。
-- `KEY_PASSWORD`：别名 `key0` 对应的私钥密码。
-
-在另一仓库运行时，要重新配置这些 Secrets（GitHub 不会在不同仓库间复制）。使用原 BitwardenPatch 的密钥并不改变 Keyguard 的包名，两个 APK 彼此不冲突。
-
-### 安装方式
-
-- `parallel`（默认）：包名为 `com.artemchep.keyguard.hyperos`。**与原 Keyguard 并存**，用于测试。需要在 Android 密码/Passkey 提供方设置里选中它，再登录你自己的密码库。
-- `original`：包名为 `com.artemchep.keyguard`，适合原来就用同一签名安装自编译 Keyguard 的用户。**若现有官方安装使用另一把签名密钥，则无法覆盖安装**。
-
-Google Services 文件由工作流为 `noneRelease` 生成无真实 API 密钥的占位配置；未接入 Google Play/CXF。实际联网、登录和密码库仍由 Keyguard 原有逻辑处理。
-
-## 版本与适配
-
-构建会严格核对源码锚点；上游更新后如果关键结构不同，脚本会直接停止，避免构建出“补丁实际没有生效”的 APK。默认基线 `r20261114`。
-
-## 静态与真机验证状态
-
-已按 `r20261114` 的三个源文件检查全部替换锚点；脚本语法及工作流 YAML 静态解析通过。**尚未在本环境成功执行完整 Gradle/Rust 编译，也未在 HyperOS 3 真机测试**。因此 APK 能否成功产出以及小米 Credential Manager 会否展示该入口，需以 GitHub Actions 和真机结果为准。
-
-建议真机检查顺序：保留官方应用、安装 `parallel` 测试版本 → 添加测试库/账号 → 在 Android 设置里指定测试版为 Passkey 提供方 → 完全锁定测试版密码库 → 在 WebAuthn 测试网站触发登录 → 检查是否出现“解锁 Keyguard”入口 → 解锁后检查是否只显示同一 RP ID 的真实 Passkey → 实测正确返回登录与取消操作。
-
-## 许可
-
-Keyguard 上游源码发布在可供个人使用的受限条款下，根目录 `LICENSE` 为 `All Rights Reserved`。本仓库只包含你自己的构建工作流和对公开源码的变更脚本。请仅在许可允许的范围内自用；不要公开分发改编后的 Keyguard APK。
-
-Keyguard upstream: https://github.com/AChep/keyguard-app
+上游地址：[AChep/keyguard-app](https://github.com/AChep/keyguard-app)。
