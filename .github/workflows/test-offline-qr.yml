@@ -1,0 +1,220 @@
+name: Keyguard offline QR experimental APK
+
+on:
+  push:
+    branches: [test/offline-qr-no-gms]
+    paths:
+      - '.github/workflows/test-offline-qr.yml'
+      - 'patches/keyguard/apply_offline_qr.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keyguard-offline-qr-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      upstream_tag: r20261114
+      should_build: 'true'
+    steps:
+      - run: echo 'Pinned experimental upstream: r20261114'
+
+  build:
+    name: Build signed Keyguard noneRelease with bundled QR model
+    runs-on: ubuntu-24.04
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    timeout-minutes: 180
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Clone a pinned Keyguard release
+        env:
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$UPSTREAM_TAG" =~ ^r20[0-9]{6}(\.[0-9]+)?$ ]] || { echo 'Unexpected tag format'; exit 1; }
+          git clone --depth 1 --branch "$UPSTREAM_TAG" \
+            https://github.com/AChep/keyguard-app.git keyguard
+          git -C keyguard log -1 --format='%H %s'
+
+      - name: Apply all validated HyperOS and Passkey patches (fail closed)
+        run: |
+          set -euo pipefail
+          python3 patches/keyguard/apply_unlock_first.py keyguard
+          python3 patches/keyguard/apply_offline_qr.py keyguard
+          git -C keyguard diff --check
+          git -C keyguard diff --stat
+          grep -Fq 'com.google.mlkit:barcode-scanning' keyguard/gradle/libs.versions.toml
+          if grep -Fq 'play-services-mlkit-barcode-scanning' keyguard/gradle/libs.versions.toml; then exit 1; fi
+          grep -Fq 'HYPEROS_UNLOCK_FIRST_SENTINEL' \
+            keyguard/common/src/androidMain/kotlin/com/artemchep/keyguard/android/PasskeyGetActivity.kt
+
+      - name: Install Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # 'tools' is an obsolete SDK package; the action's default list fails.
+          packages: platform-tools
+
+      - name: Install Android NDK matching Keyguard catalog
+        working-directory: keyguard
+        run: |
+          set -euo pipefail
+          NDK_VERSION="$(sed -nE 's/^[[:space:]]*androidNdk[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' gradle/libs.versions.toml)"
+          test -n "$NDK_VERSION"
+          yes | sdkmanager --install "ndk;$NDK_VERSION" || test -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/$NDK_VERSION"
+
+      - name: Install Linux native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libclang-dev
+
+      - name: Setup pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: beta-2026-07-15
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: keyguard-cargo-r20261114-${{ runner.os }}-${{ hashFiles('keyguard/**/Cargo.lock') }}
+          restore-keys: |
+            keyguard-cargo-r20261114-${{ runner.os }}-
+
+      - name: Prefetch native dependencies
+        working-directory: keyguard
+        env:
+          PREFETCH_PROFILE: android
+          PREFETCH_MANIFESTS: ''
+        run: bash .github/actions/prefetch_native/prefetch.sh
+
+      - name: Preserve tested parallel package identity for in-place upgrades
+        working-directory: keyguard
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          p = Path('androidApp/build.gradle.kts')
+          source = p.read_text()
+          old = '    buildTypes {\n        create("benchmarkRelease")'
+          assert source.count(old) == 1, 'Release buildType anchor changed upstream'
+          p.write_text(source.replace(old, '    buildTypes {\n        getByName("release").applicationIdSuffix = ".hyperos"\n        create("benchmarkRelease")', 1))
+          PYTHON
+
+      - name: Prepare noneRelease signing and non-Play-services configuration
+        working-directory: keyguard
+        env:
+          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SIGN_KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_PASSWORD" ]]; then
+            echo 'Configure SIGN_KEYSTORE_BASE64, KEYSTORE_PASSWORD and KEY_PASSWORD secrets first.' >&2
+            exit 1
+          fi
+          printf '%s' "$SIGN_KEYSTORE_BASE64" | base64 -d > androidApp/keyguard-release.keystore
+          # Keyguard signing loader intentionally reads these two property names
+          # in the reverse order of their ordinary English meanings.
+          printf 'key_alias=key0\npassword_store=%s\npassword_key=%s\n' \
+            "$KEY_PASSWORD" "$KEYSTORE_PASSWORD" > androidApp/keyguard-release.properties
+          chmod 600 androidApp/keyguard-release.keystore androidApp/keyguard-release.properties
+          keytool -list -keystore androidApp/keyguard-release.keystore \
+            -storepass "$KEYSTORE_PASSWORD" -alias key0 >/dev/null
+
+          # Firebase is unused by the none flavor. This config only satisfies the
+          # google-services Gradle plugin; it contains no production API keys.
+          app_id='com.artemchep.keyguard.hyperos'
+          cat > androidApp/google-services.json <<JSON
+          {
+            "project_info": {
+              "project_number": "1234567890",
+              "project_id": "keyguard-personal-none-build",
+              "storage_bucket": "keyguard-personal-none-build.appspot.com"
+            },
+            "client": [{
+              "client_info": {
+                "mobilesdk_app_id": "1:1234567890:android:abcdefabcdefabcdefabcdef",
+                "android_client_info": { "package_name": "${app_id}" }
+              },
+              "oauth_client": [],
+              "api_key": [{"current_key": "keyguard-local-none-flavor-placeholder"}],
+              "services": {}
+            }],
+            "configuration_version": "1"
+          }
+          JSON
+          cat >> gradle.properties <<'PROPERTIES'
+
+          # Personal CI build on the standard 7 GB Actions runner.
+          org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+          kotlin.compiler.execution.strategy=in-process
+          org.gradle.parallel=false
+          buildkonfig.flavor=release
+          PROPERTIES
+          printf '\nversionRef=%s\n' "$(git rev-parse --short HEAD)" >> gradle.properties
+
+      - name: Generate third-party license metadata
+        working-directory: keyguard
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --max-workers=2 :androidApp:licenseeAndroidNoneRelease
+          mv androidApp/build/reports/licensee/androidNoneRelease/artifacts.json \
+            common/src/commonMain/composeResources/files/licenses.json
+
+      - name: Build patched noneRelease APK
+        working-directory: keyguard
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --max-workers=2 :androidApp:assembleNoneRelease \
+            -Pkeyguard.nativeCargo.cargoOffline=true
+
+      - name: Verify APK and native libraries
+        run: |
+          set -euo pipefail
+          APK=keyguard/androidApp/build/outputs/apk/none/release/androidApp-none-release.apk
+          test -s "$APK"
+          (cd keyguard && python3 scripts/verify_native_bundle.py android \
+            androidApp/build/outputs/apk/none/release/androidApp-none-release.apk)
+          "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/$(ls "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" | sort -V | tail -1)/apksigner" \
+            verify --print-certs "$APK"
+          mkdir -p dist
+          cp "$APK" "dist/Keyguard-${{ needs.resolve.outputs.upstream_tag }}-noneRelease-hyperos-offline-qr-test.apk"
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload personal build (not a public GitHub Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyguard-offline-qr-test-${{ needs.resolve.outputs.upstream_tag }}
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
