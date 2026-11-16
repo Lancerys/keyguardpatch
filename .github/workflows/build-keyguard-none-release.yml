@@ -296,7 +296,7 @@ jobs:
           - Real Passkey picker after unlocking, with RP matching and native assertion
           - Bitwarden-style login title, username and URI prefill when creating Passkeys
 
-          Package: `com.artemchep.keyguard.hyperos` (same signing identity across builds).
+          Package: com.artemchep.keyguard.hyperos (same signing identity across builds).
           Created from upstream sources using the patches in this repository.
 
           Note: Keyguard upstream declares All Rights Reserved. Respect its distribution terms.
