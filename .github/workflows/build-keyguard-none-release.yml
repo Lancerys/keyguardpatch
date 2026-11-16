@@ -44,6 +44,7 @@ jobs:
           REQUESTED_TAG: ${{ inputs.upstream_tag || '' }}
           FORCE_BUILD: ${{ inputs.force_build || false }}
           EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail
           if [[ -n "$REQUESTED_TAG" ]]; then
@@ -59,7 +60,11 @@ jobs:
           apk="Keyguard-${tag}-noneRelease-hyperos.apk"
           should_build=true
           if [[ "$EVENT_NAME" != "push" && "$FORCE_BUILD" != "true" ]]; then
-            if gh release view "$tag" --repo "$GITHUB_REPOSITORY"               --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$apk"; then
+            if [[ "$REPO_PRIVATE" == "true" ]]; then
+              if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$apk"; then
+                should_build=false
+              fi
+            elif gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               should_build=false
             fi
           fi
@@ -267,6 +272,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+      REPO_PRIVATE: ${{ github.event.repository.private }}
     steps:
       - name: Download fully verified APK
         uses: actions/download-artifact@v4
@@ -299,12 +305,16 @@ jobs:
           Package: com.artemchep.keyguard.hyperos (same signing identity across builds).
           Created from upstream sources using the patches in this repository.
 
-          Note: Keyguard upstream declares All Rights Reserved. Respect its distribution terms.
+          Distribution: upstream declares All Rights Reserved. APK assets are published only from private repositories.
           EOF
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "$GITHUB_REPOSITORY"               --title "Keyguard ${tag} · HyperOS patched" --notes-file RELEASE_NOTES.md
           fi
-          gh release upload "$tag" "$file" dist/SHA256SUMS.txt             --repo "$GITHUB_REPOSITORY" --clobber
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets             --jq '.assets[].name'
+          if [[ "$REPO_PRIVATE" == "true" ]]; then
+            gh release upload "$tag" "$file" dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+          else
+            echo "::warning::Public repository: release notes only; do not redistribute proprietary Keyguard APK assets."
+          fi
