@@ -1,6 +1,11 @@
 name: Build Keyguard noneRelease (HyperOS unlock-first)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-keyguard-none-release.yml'
+      - 'patches/keyguard/**'
   workflow_dispatch:
     inputs:
       upstream_tag:
@@ -42,7 +47,7 @@ jobs:
 
       - name: Clone a pinned Keyguard release
         env:
-          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag || 'r20261114' }}
         run: |
           set -euo pipefail
           [[ "$UPSTREAM_TAG" =~ ^r20[0-9]{6}(\.[0-9]+)?$ ]] || { echo 'Unexpected tag format'; exit 1; }
@@ -113,7 +118,7 @@ jobs:
       - name: Choose parallel or original APK package identity
         working-directory: keyguard
         env:
-          INSTALL_MODE: ${{ inputs.install_mode }}
+          INSTALL_MODE: ${{ inputs.install_mode || 'parallel' }}
         run: |
           set -euo pipefail
           if [[ "$INSTALL_MODE" == 'parallel' ]]; then
@@ -137,7 +142,7 @@ jobs:
           SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          INSTALL_MODE: ${{ inputs.install_mode }}
+          INSTALL_MODE: ${{ inputs.install_mode || 'parallel' }}
         run: |
           set -euo pipefail
           if [[ -z "$SIGN_KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_PASSWORD" ]]; then
@@ -213,14 +218,14 @@ jobs:
           "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/$(ls "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" | sort -V | tail -1)/apksigner" \
             verify --print-certs "$APK"
           mkdir -p dist
-          cp "$APK" "dist/Keyguard-${{ inputs.upstream_tag }}-noneRelease-${{ inputs.install_mode }}-unlockFirst.apk"
+          cp "$APK" "dist/Keyguard-${{ inputs.upstream_tag || 'r20261114' }}-noneRelease-${{ inputs.install_mode || 'parallel' }}-unlockFirst.apk"
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           cat dist/SHA256SUMS.txt
 
       - name: Upload personal build (not a public GitHub Release)
         uses: actions/upload-artifact@v4
         with:
-          name: keyguard-noneRelease-unlockFirst-${{ inputs.upstream_tag }}
+          name: keyguard-noneRelease-unlockFirst-${{ inputs.upstream_tag || 'r20261114' }}
           path: |
             dist/*.apk
             dist/SHA256SUMS.txt
